@@ -29,8 +29,6 @@ RUN rm -f *.*
 WORKDIR ../root
 #Copy the osfci contents to the images
 COPY . . 
-#RUN go build main.go
-#RUN go build rp.go
 
 #Execute start script for web server and proxy. 
 
