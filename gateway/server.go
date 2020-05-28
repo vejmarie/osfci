@@ -37,10 +37,13 @@ var certStorage = os.Getenv("CERT_STORAGE")
 var ExpectediLOIp = os.Getenv("EXPECT_ILO_IP")
 var credentialUri = os.Getenv("CREDENTIALS_URI")
 var credentialPort = os.Getenv("CREDENTIALS_TCPPORT")
+var compileUri = os.Getenv("COMPILE_URI")
+var compileTcpPort = os.Getenv("COMPILE_TCPPORT")
 
 type serverEntry struct {
         servername string
         ip string
+        bmcIp string
 	currentOwner string
 	queue int
 	expiration time.Time
@@ -71,17 +74,7 @@ func ShiftPath(p string) (head, tail string) {
     return p[1:i], p[i:]
 }
 
-func checkAccess(w http.ResponseWriter, r *http.Request) (bool){
-	var url = r.URL.Path
-	var command string
-	entries := strings.Split(strings.TrimSpace(url[1:]), "/") 
-	var login string
-
-	// The login is always accessible
-	if ( len(entries) > 2 ) {
-		command = entries[2]
-		login = entries[1]
-	} 
+func checkAccess(w http.ResponseWriter, r *http.Request, login string, command string) (bool){
 	switch command {
 		case "getToken":
 				if ( r.Method == http.MethodGet || r.Method == http.MethodPost ) {
@@ -112,18 +105,13 @@ func checkAccess(w http.ResponseWriter, r *http.Request) (bool){
 		}
                 // Is this an AWS request ?
                 words := strings.Fields(r.Header.Get("Authorization"))
-                if ( words[0] == "JYP" ) {
+                if ( words[0] == "OSF" ) {
                         // Let's dump the various content
                         keys := strings.Split(words[1],":")
                         // We must retrieve the secret key used for encryption and calculate the header
                         // if everything is ok (aka our computed value match) we are good
 
-			path := strings.Split( r.URL.Path, "/" )
-		        if ( len(path) < 3 ) {
-		                http.Error(w, "401 Malformed URI", 401)
-		                return false
-		        }
-		        username := path[2]
+		        username := login
 
 			result:=base.HTTPGetRequest("http://"+r.Host+":9100"+"/user/"+username+"/userGetInternalInfo")
 
@@ -151,8 +139,18 @@ func checkAccess(w http.ResponseWriter, r *http.Request) (bool){
 }
 
 func user(w http.ResponseWriter, r *http.Request) {
+	
+        var command string
+        entries := strings.Split(strings.TrimSpace(r.URL.Path[1:]), "/")
+        var login string
 
-	if ( !checkAccess(w, r)  ) {
+        // The login is always accessible
+        if ( len(entries) > 2 ) {
+                command = entries[2]
+                login = entries[1]
+        }
+
+	if ( !checkAccess(w, r, login, command)  ) {
 		w.Write([]byte("Access denied"))
 		return
 	}
@@ -176,12 +174,18 @@ func home(w http.ResponseWriter, r *http.Request) {
 
 	// The cookie allow us to track the current
 	// user on the node
-        cookie, _ := r.Cookie("osfci_cookie")
+        cookie, cookieErr := r.Cookie("osfci_cookie")
 
 	head, tail := ShiftPath( r.URL.Path)
 	if ( head == "ci" ) {
 		head,_ = ShiftPath(tail)
 	}
+	// Some commands are superseed by a username so we shall identify
+	// if that is the case. If the command is unknown then we can assume
+	// we are getting a username as a head parameter and must get the 
+	// remaining part
+
+
 
 	// If the request is different than a getServer
 	// We must be sure that the end user still has an active server
@@ -191,52 +195,54 @@ func home(w http.ResponseWriter, r *http.Request) {
 		case "getServer":
 			// We need to have a valid cookie and associated Public Key / Private Key otherwise
 			// We can't request a server
-			if ( cookie.Value != "" ) {
-				// To do so I must sent the cookie value to the user API and
-				// get a respond. If it is gone we must denied the demand
-				type returnValue struct {
-                                        Servername string
-                                        Waittime string
-					Queue string
-					RemainingTime string
-                                }
-                                var myoutput returnValue	
-				ciServers.mux.Lock()
-				actualTime := time.Now().Add(time.Second*3600*365*10)
-				index := 0
-				for i, _ := range ciServers.servers { 
-					if ( time.Now().After(ciServers.servers[i].expiration) ) {
-						// the server is available we can allocate it
-						ciServers.servers[i].expiration = time.Now().Add(time.Second*time.Duration(base.MaxServerAge))
-						ciServers.servers[i].currentOwner = cookie.Value
-						ciServers.mux.Unlock()
-
-						myoutput.Servername = ciServers.servers[i].servername
-						myoutput.Waittime = "0"
-						myoutput.RemainingTime = fmt.Sprintf("%d",base.MaxServerAge)
-						return_data,_ := json.Marshal(myoutput)
-						if ( ciServers.servers[i].queue > 0 ) {
-							ciServers.servers[i].queue = ciServers.servers[i].queue - 1
+			if ( cookieErr == nil ) {
+				if ( cookie.Value != "" ) {
+					// To do so I must sent the cookie value to the user API and
+					// get a respond. If it is gone we must denied the demand
+					 type returnValue struct {
+       	                                 Servername string
+       	                                 Waittime string
+						Queue string
+						RemainingTime string
+       		                         }
+       		                         var myoutput returnValue	
+					ciServers.mux.Lock()
+					actualTime := time.Now().Add(time.Second*3600*365*10)
+					index := 0
+					for i, _ := range ciServers.servers { 
+						if ( time.Now().After(ciServers.servers[i].expiration) ) {
+							// the server is available we can allocate it
+							ciServers.servers[i].expiration = time.Now().Add(time.Second*time.Duration(base.MaxServerAge))
+							ciServers.servers[i].currentOwner = cookie.Value
+							ciServers.mux.Unlock()
+	
+							myoutput.Servername = ciServers.servers[i].servername
+							myoutput.Waittime = "0"
+							myoutput.RemainingTime = fmt.Sprintf("%d",base.MaxServerAge)
+							return_data,_ := json.Marshal(myoutput)
+							if ( ciServers.servers[i].queue > 0 ) {
+								ciServers.servers[i].queue = ciServers.servers[i].queue - 1
+							}
+							w.Write([]byte(return_data))
+							// We probably need to turn it off just to clean it
+							return
 						}
-						w.Write([]byte(return_data))
-						// We probably need to turn it off just to clean it
-						return
+						if ( actualTime.After(ciServers.servers[i].expiration) ) {
+							actualTime = ciServers.servers[i].expiration
+							index = i
+						}
+						
 					}
-					if ( actualTime.After(ciServers.servers[i].expiration) ) {
-						actualTime = ciServers.servers[i].expiration
-						index = i
-					}
-					
+					ciServers.mux.Unlock()
+					myoutput.Servername = ""
+					remainingTime := actualTime.Sub(time.Now())
+					myoutput.Waittime = fmt.Sprintf("%.0f", remainingTime.Seconds())
+					myoutput.Queue = fmt.Sprintf("%d",ciServers.servers[index].queue)
+					ciServers.servers[index].queue = ciServers.servers[index].queue + 1	
+					myoutput.RemainingTime = fmt.Sprintf("%d",0)
+					return_data,_ := json.Marshal(myoutput)
+					w.Write([]byte(return_data))
 				}
-				ciServers.mux.Unlock()
-				myoutput.Servername = ""
-				remainingTime := actualTime.Sub(time.Now())
-				myoutput.Waittime = fmt.Sprintf("%.0f", remainingTime.Seconds())
-				myoutput.Queue = fmt.Sprintf("%d",ciServers.servers[index].queue)
-				ciServers.servers[index].queue = ciServers.servers[index].queue + 1	
-				myoutput.RemainingTime = fmt.Sprintf("%d",0)
-				return_data,_ := json.Marshal(myoutput)
-				w.Write([]byte(return_data))
 			}
 		case "stopServer":
 			// We must get the server name
@@ -244,24 +250,46 @@ func home(w http.ResponseWriter, r *http.Request) {
 			servername,_ := ShiftPath(tail)
 			// Ok we must look for this server into the ciServer list
 			// we must validate that the cookie if the right one
-			for i, _ := range ciServers.servers {
-				if ( ciServers.servers[i].servername == servername ) {
-					if ( ciServers.servers[i].currentOwner == cookie.Value ) {
-						// Ok we can free the server
-						// This is done by resetting the expiration
-						ciServers.servers[i].expiration = time.Now();
-						ciServers.servers[i].currentOwner = ""
+			if ( cookieErr == nil ) {
+				for i, _ := range ciServers.servers {
+					if ( ciServers.servers[i].servername == servername ) {
+						if ( ciServers.servers[i].currentOwner == cookie.Value ) {
+							// Ok we can free the server
+							// This is done by resetting the expiration
+							ciServers.servers[i].expiration = time.Now();
+							ciServers.servers[i].currentOwner = ""
+						}
 					}
 				}
 			}
 		case "bmcup":
-		        conn, err := net.DialTimeout("tcp", ExpectediLOIp+":443", 220*time.Millisecond)
+		       bmcIp := ""
 			var Up string
-		        if ( err == nil ) {
-		                conn.Close()
-				// The controller is up				
-				Up = "1"
-		        } else {
+			if ( cookieErr == nil ) {
+			        if ( cookie.Value != "" ) {
+			                // We must get the IP address from the cache
+			                for i, _ := range ciServers.servers {
+			                        if ( ciServers.servers[i].currentOwner == cookie.Value ) {
+			                                if ( time.Now().Before(ciServers.servers[i].expiration) ) {
+		                                        // We still own the server and we can go to the BMC
+		                                        bmcIp = ciServers.servers[i].bmcIp
+		                                	}
+		                        	}
+		                	}
+			        } 
+				if ( bmcIp != "" ) {
+				        conn, err := net.DialTimeout("tcp", bmcIp+":443", 220*time.Millisecond)
+				        if ( err == nil ) {
+				                conn.Close()
+						// The controller is up				
+						Up = "1"
+				        } else {
+						Up = "0"
+					}
+				} else {
+					Up = "0"
+				}
+			} else {
 				Up = "0"
 			}
 			return_value,_ := json.Marshal(Up)
@@ -364,6 +392,26 @@ func home(w http.ResponseWriter, r *http.Request) {
                         r.URL.Path = "/biosfirmware"
                         r.Header.Set("X-Forwarded-Host", r.Header.Get("Host"))
                         proxy.ServeHTTP(w , r)
+		case "buildbiosfirmware":
+			_, tail = ShiftPath( r.URL.Path)
+                        keys := strings.Split(tail,"/")
+			login := keys[2]
+			command := keys[1]
+		        if ( !checkAccess(w, r, login, command)  ) {
+        		        w.Write([]byte("Access denied"))
+	               		 return
+        		}
+			// We have to forward the request to the compile server
+			// which will start the compilation process and return
+			// the code to connect to the ttyd daemon
+			fmt.Printf("Forward biosfirmware upload\n");
+                        url, _ := url.Parse("http://"+compileUri+compileTcpPort)
+                        proxy := httputil.NewSingleHostReverseProxy(url)
+                        r.URL.Host = "http://"+compileUri+compileTcpPort
+			fmt.Printf("Tail %s\n",tail)
+                        r.URL.Path = tail
+                        r.Header.Set("X-Forwarded-Host", r.Header.Get("Host"))
+                        proxy.ServeHTTP(w , r)
 		case "":
                         b, _ := ioutil.ReadFile(staticAssetsDir+"/html/homepage.html") // just pass the file name
                         // this is a potential template file we need to replace the http field
@@ -379,7 +427,7 @@ func home(w http.ResponseWriter, r *http.Request) {
 
 func iloweb(w http.ResponseWriter, r *http.Request){
 	// Let's print the session ID
-//        cookie, err := r.Cookie("osfci_cookie")
+        cookie, err := r.Cookie("osfci_cookie")
 
 
 	// If the request is for a favicon.ico file we are just returning
@@ -389,10 +437,45 @@ func iloweb(w http.ResponseWriter, r *http.Request){
 		return
 	}
 
+	// We must validate if the user is coming with a cookie
+	// if yes we must look to which server it is allocated
+	// if it is not allocated to any then we probably need to reroute him
+	// to the homepage !
+
+	bmcIp := ""
+	if ( err == nil ) {
+		if ( cookie.Value != "" ) {
+			// We must get the IP address from the cache
+			for i, _ := range ciServers.servers {
+				if ( ciServers.servers[i].currentOwner == cookie.Value ) {
+					if ( time.Now().Before(ciServers.servers[i].expiration) ) {
+						// We still own the server and we can go to the BMC
+						bmcIp = ciServers.servers[i].bmcIp
+					}
+				}
+			}
+		} else {
+			if ( DNSDomain != "" ) {
+       	                 http.Redirect(w, r, "https://"+DNSDomain+"/ci", 302)
+       	         }
+       	         return
+		}
+	} else {
+		if ( DNSDomain != "" ) {
+                        http.Redirect(w, r, "https://"+DNSDomain+"/ci", 302)
+                }
+                return
+	}	
+	if ( bmcIp == "" ) {
+                if ( DNSDomain != "" ) {
+                        http.Redirect(w, r, "https://"+DNSDomain+"/ci", 302)
+                }
+                return
+        }
 	// We must know if iLo is started or not ?
 	// if not then we have to reroute to the actual homepage
 	// We can make a request to the website or
-	conn, err := net.DialTimeout("tcp", ExpectediLOIp+":443", 220*time.Millisecond)
+	conn, err := net.DialTimeout("tcp", bmcIp+":443", 220*time.Millisecond)
 	if ( err != nil ) {
 		if ( DNSDomain != "" ) {
 			http.Redirect(w, r, "https://"+DNSDomain+"/ci", 302)
@@ -402,7 +485,7 @@ func iloweb(w http.ResponseWriter, r *http.Request){
 		conn.Close()
 	}
 	// Must specify the iLo Web address
-	url, _ := url.Parse("https://"+ExpectediLOIp+":443")
+	url, _ := url.Parse("https://"+bmcIp+":443")
 	proxy := httputil.NewSingleHostReverseProxy(url)
 	var InsecureTransport http.RoundTripper = &http.Transport{
 		Dial: (&net.Dialer{
@@ -448,6 +531,8 @@ func main() {
     newEntry.currentOwner=""
     // the server is expired
     newEntry.expiration = time.Now()
+    // by the way its bmc interface is
+    newEntry.bmcIp=ExpectediLOIp 
     newEntry.queue = 0
 
     ciServers.mux.Lock()

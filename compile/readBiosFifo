@@ -1,5 +1,5 @@
 #!/bin/bash
-pipe=./iloem100
+pipe=/usr/local/production/tmp/bios_fifo
 while true
 do
     if read line ; then
